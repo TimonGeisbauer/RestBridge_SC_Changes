@@ -1,0 +1,85 @@
+use com.basiscomponents.db.DataRow
+use com.basiscomponents.db.ResultSet
+
+class public RequestLogBC
+
+    field private BBjString tpl$="ID:C(16*),METHOD:C(1*),START:N(1*),END:N(1*),DURATION:N(1*),ADDR:C(1*),URL:C(1*),URI:C(1*),QUERY:C(1*),HEADERS:C(1*),PARAMS:C(1*),STATUS:C(1*)"
+    
+    field private DataRow filter! = new DataRow()
+    field private DataRow fieldSel! = new DataRow()
+
+    method public RequestLogBC()
+    methodend 
+
+    method public DataRow getAttributesRecord()
+        declare DataRow attr!
+        attr! = new DataRow()
+
+        attr!.setFieldValue("ID", "")
+        attr!.setFieldValue("METHOD", "")
+        attr!.setFieldValue("START", "")
+        attr!.setFieldValue("END", "")
+        attr!.setFieldValue("DURATION", "")
+        attr!.setFieldValue("ADDR", "")
+        attr!.setFieldValue("URL", "")
+        attr!.setFieldValue("URI", "")
+        attr!.setFieldValue("QUERY", "")
+        attr!.setFieldValue("HEADERS", "")
+        attr!.setFieldValue("PARAMS", "")
+        attr!.setFieldValue("STATUS", "")
+
+        methodret attr!
+    methodend
+
+    method public void setFilter(DataRow filter!)
+        if filter! = null() then
+            filter! = new DataRow()
+        endif
+
+        #filter! = filter!
+    methodend
+
+    method public void setFieldSelection(DataRow fieldSel!)
+        if fieldSel! = null() then
+            fieldSel! = new DataRow()
+        endif
+
+        #fieldSel! = fieldSel!
+    methodend
+
+    method public ResultSet retrieve()
+        rem is request loggin enabled    
+        requestLog$=stbl("REST_REQUESTLOG",err=request_log_disabled)
+
+        ch=unt
+        open (ch,err=request_log_disabled)requestLog$
+
+        dim tpl$:#tpl$
+
+        declare DataRow dr!
+        declare ResultSet rs!
+        rs! = new ResultSet()
+
+        while 1
+            read record (ch,end=*break) tpl$
+            dr! = com.basiscomponents.db.DataRow.fromTemplate(#tpl$, tpl$)
+            rs!.addItem(dr!)
+        wend
+
+        close (ch)
+
+        if !#filter!.isEmpty() then
+            rs! = rs!.filterBy(#filter!)
+        endif
+
+        if !#fieldSel!.isEmpty() then
+            rs! = rs!.setFieldSelection(#fieldSel!.getFieldNames())
+        endif
+
+        methodret rs!
+
+        request_log_disabled:
+            throw "Request Logging is not enabled", 404
+    methodend
+
+classend

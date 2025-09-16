@@ -1,8 +1,10 @@
 use java.util.HashMap
 
+use com.basiscomponents.db.DataRow
 use com.basiscomponents.db.ResultSet
 use com.basiscomponents.db.ResultSetExporter
 
+use ::RestBridge/admin/RequestLogBC.bbj::RequestLogBC
 use ::RestBridge/OutputHandler.bbj::OutputHandler
 
 use java.io.File
@@ -12,17 +14,15 @@ use java.io.IOException
 use java.util.zip.ZipEntry
 use java.util.zip.ZipOutputStream
 
-use java.io.ByteArrayOutputStream
 use java.nio.charset.Charset
 
 class public RestBridge
 
     field public static BBjString LOGTPL$="ID:C(16*),METHOD:C(1*),START:N(1*),END:N(1*),DURATION:N(1*),ADDR:C(1*),URL:C(1*),URI:C(1*),QUERY:C(1*),HEADERS:C(1*),PARAMS:C(1*),STATUS:C(1*)"
-    field private HashMap parameterMap!
 
-    METHOD PUBLIC void service(BBxServletContext context!)
-        declare BBxServletRequest request!
-        declare BBxServletResponse response!
+    METHOD PUBLIC void service(BBjspServletContext context!)
+        declare BBjspWebRequest request!
+        declare BBjspWebResponse response!
         
         request! = context!.getRequest()
         response! = context!.getResponse()
@@ -34,18 +34,6 @@ class public RestBridge
             System.out.println("REST request HEADER "+request!.getRequestURL())
             System.out.println("REST request end -----------------------")
         fi
-
-        servletParams! = #getServletParameters(context!)
-
-        if servletParams!.get("REST_TRACE") <> null() then
-            tracedir$ = servletParams!.get("REST_TRACE").toString()
-            tracedir! = new File(tracedir$,err=*endif)
-            if tracedir!.exists() AND tracedir!.isDirectory()  then
-                TRACE_CH=UNT
-                OPEN (TRACE_CH,MODE="O_CREATE,O_TRUNC")tracedir$+"/RestBridge_"+str(System.currentTimeMillis())+"_"+str(dec(INFO(3,1)))+".trace"
-                SETTRACE (TRACE_CH)
-            endif
-        endif
 
         param! = context!.getInitParameter("REST_REQUESTLOG")
         if param! <> null() then
@@ -164,7 +152,7 @@ class public RestBridge
             break
         swend
         
-        
+        servletParams! = #getServletParameters(context!) 
         
         rem The authentication program might be relative to the WD but not to any directory in the prefix
         rem therefore switch to the WD for the authentication program call
@@ -200,7 +188,7 @@ class public RestBridge
                 auth$=str(request!.getHeader("authorization",err=*next))
             fi   
         
-            if cvs(str(request!.getParameter("grant_type")),4) = "PASSWORD" then
+            if cvs(request!.getParameter("grant_type"),4) = "PASSWORD" then
                 user$=request!.getParameter("username")
                 password$=request!.getParameter("password")
                 auth$="Basic "+java.util.Base64.getEncoder().encode(user$+":"+password$)
@@ -231,13 +219,6 @@ class public RestBridge
             ses_list! = BBjAPI().getGlobalNamespace().getValue(uid$+"_list")
         endif
 
-        running_list! = BBjAPI().getGlobalNamespace().getValue(uid$+"_running_list",err=*next)
-        if running_list! = null() then
-            BBjAPI().getGlobalNamespace().setValue(uid$+"_running_list",new java.util.HashSet())
-            running_list! = BBjAPI().getGlobalNamespace().getValue(uid$+"_running_list")
-        endif
-
-
         while 1
             if (ses_list!.empty())
                 servletParams! = #getServletParameters(context!)
@@ -249,33 +230,6 @@ class public RestBridge
                     goto setup_err
                 endif
 
-                if servletParams!.containsKey("REST_MAX_WORKER_COUNT") then
-
-                    REST_MAX_WORKER_COUNT = NUM(STR(servletParams!.get("REST_MAX_WORKER_COUNT")))
-
-                    if (debug) then
-                        System.out.println("REST: Checking for REST_MAX_WORKER_COUNT="+str(REST_MAX_WORKER_COUNT))
-                        System.out.println("REST: "+str(running_list!.size())+" running.")
-                    fi
-
-                    if running_list!.size() <=  REST_MAX_WORKER_COUNT then
-
-                            rem first try to see if they're really all busy
-                            ks! = running_list!.clone().iterator()
-                            while ks!.hasNext()
-                                s$ = ks!.next()
-                                if (!#checkSession(s$)) then
-                                    running_list!.remove(s$)
-                                    System.out.println("****CLEAN OUT FROM RUNNING LIST: "+s$)
-                                fi
-                            wend
-                    fi
-
-                    if running_list!.size() >=  REST_MAX_WORKER_COUNT then
-                            goto too_many_workers_err
-                    fi
-                fi
-
                 ses$ = #newSession(auth$,servletParams!)
                 break
             else
@@ -285,8 +239,6 @@ class public RestBridge
                 endif
             endif
         wend
-
-        running_list!.add(ses$)
 
         params! = new HashMap()
         it! = request!.getParameterNames().iterator()
@@ -356,21 +308,15 @@ class public RestBridge
         wend
         req!.put("headers", headers!)
         
-        bodyBytes! = #getBody(request!)
-        if (debug) then
-            System.out.println("Body: " + bodyBytes!)
-        fi
-
-        if bodyBytes! <> null() then  
-
-            rem converting the request body into the server's character encoding      
-            body! = new String(bodyBytes!, info(1,2))   
-
-            if (debug) then
-                System.out.println("Server Encoding: " + info(1,2))
-                System.out.println("Encoded Body: " + body!)
-            fi
-
+        body! = request!.getBody(err=*next)
+        if body! <> null() then     
+            if requestCharSet$ = "" then
+                body! = new String(body!, defaultCharset!).getBytes("ISO-8859-1")           
+                body! = new String(body!, defaultCharset!).getBytes(info(1,2))
+            else
+                body! = new String(body!, requestCharSet$).getBytes(info(1,2))
+            endif           
+            
             req!.put("body", body!)
         endif
         
@@ -381,8 +327,6 @@ class public RestBridge
         else
             answer! = #invoke(ses$,req!)
         fi
-        
-        running_list!.remove(ses$)
         ses_list!.push(ses$)
 
         accept$=str(params!.get("_ACCEPT"))
@@ -431,12 +375,8 @@ class public RestBridge
         errorcode$ = str(answer!.get("errorcode"))
 
         blobdata$=str(params!.get("_BLOBDATA"))
-       
-        if debug then
-            System.out.println(params!)
-            System.out.println("BLOBDATA : "+blobdata$)
-        fi
-        
+        System.out.println(params!)
+        System.out.println("BLOBDATA : "+blobdata$)
         if blobdata$<>"null" then
             rs! = answer!.get("resultset",err=*next)
             if rs! = null() or rs!.size() = 0 or !rs!.getItem(0).getFieldNames().contains(blobdata$) then
@@ -517,16 +457,9 @@ class public RestBridge
             ch=unt
             open (ch,err=filenotfund)file$
             close (ch)
-                   
-            if debug then
-                System.out.println(file$)
-            fi
-            
+            System.out.println(file$)
             fullPath$ = BBjAPI().getFileSystem().resolvePath(file$)
-            
-            if debug then
-                System.out.println(fullPath$)
-            fi
+            System.out.println(fullPath$)
 
             filename$=fullPath$
             if (pos("/"=filename$)>0) then
@@ -551,9 +484,8 @@ class public RestBridge
             goto done_file
 
             filenotfund:
-            if debug then
-                System.out.println("file not found")
-            fi 
+            System.out.println("not found")
+
             response!.getOutputStream().write("file not found!")
             response!.setStatus(404)
 
@@ -568,36 +500,48 @@ class public RestBridge
 
         rem if the status code is not starting with 20, an error occurred
         if statuscode! <> null() and !mask(statuscode!,"20\d") then
-            
-        rem Handling the output format
-        seterr output_creation_error
-            namespace! = BBjAPI().getGlobalNamespace()
-            handler! = namespace!.getValue(ses$ + "_OUTPUT_HANDLER", err=*next)
-            if handler! <> null() then
-                outputHandler! = eval(handler!)
+            rem System.out.println("REST: error "+str(statuscode!)+" - "+str(errormsg!))
+            if pos("application/json"=accept$) > 0 then
+                response!.setStatus(num(statuscode!))
+                response!.setContentType("application/json")
+                rs! = answer!.get("resultset",err=*next)
+                if method$ = "POST" and rs! <> null() and rs!.size() > 0 then
+                    wr! = new java.io.StringWriter()
+                    ResultSetExporter.writeJSON(rs!,wr!,restbridge_opt_jsonmeta)
+                    wr!.flush()
+                    wr!.close()
+                    response!.getOutputStream().write(wr!.toString())
+                    #logResponse(req_id$,response!)
+                else
+                    ok = 0; java.lang.Class.forName("org.apache.commons.lang.StringEscapeUtils", err=*next); ok = 1
+                    if ok then
+                        rem BBj 18.21 or older
+                        escapedErrorMessage! = org.apache.commons.lang.StringEscapeUtils.escapeJavaScript(errormsg!)
+                        escapedStacktrace! = org.apache.commons.lang.StringEscapeUtils.escapeJavaScript(stacktrace$)
+                    else
+                        rem BBj 19.00 or newer
+                        escapedErrorMessage! = org.apache.commons.lang3.StringEscapeUtils.escapeEcmaScript(errormsg!)
+                        escapedStacktrace! = org.apache.commons.lang3.StringEscapeUtils.escapeEcmaScript(stacktrace$)
+                    endif 
+
+                    e$ = "{""code"":"""+str(errorcode$)+""",""message"":"""+ escapedErrorMessage! +""","
+                    if debug and statuscode! <> "401" then
+                        e$ = e$ + """stacktrace"":"""+ escapedStacktrace! +""","
+                    endif
+                    e$ = e$ + """ses"":"""+ses$+"""}"
+                    response!.getOutputStream().write(e$)
+                endif
             else
-                outputHandler! = new OutputHandler()
+                response!.setContentType("text/html")
+                s! = response!.getOutputStream()
+                s!.write("<html><head><meta http-equiv=""Content-Type"" content=""text/html; charset=UTF-8""/><title>"+str(errormsg!)+"</title></head>")
+                s!.write("<body><h2>HTTP ERROR "+str(statuscode!)+"</h2><p>Problem accessing "+request!.getRequestURI()+". Reason:<hr><blockquote><pre>!ERROR="+errorcode$+" "+str(errormsg!))
+                if debug and statuscode! <> "401" then
+                    s!.write($0a$+stacktrace$)
+                endif
+                s!.write("</pre></blockquote><hr></p></body></html>")
+                response!.setStatus(num(statuscode!))
             endif
-            
-            outputHandler!.setSession(ses$)
- 
-            outputHandler!.setInvokeResult(answer!)
-            
-            rem set the charset 
-            outputHandler!.setCharset(usedCharset!)
-            
-            outputHandler!.setResponse(response!)
-            outputHandler!.setRequest(request!)
-
-            outputHandler!.setAccept(accept$)
-            outputHandler!.setStatuscode(statuscode!)
-            outputHandler!.setErrormsg(errormsg!)
-            outputHandler!.setErrorcode(errorcode$)
-            outputHandler!.setStacktrace(stacktrace$)
-
-            
-            outputHandler!.createErrorOutput()
-
             rem ToDo: add error output for xml and csv
             #logResponse(req_id$,response!)
             methodret
@@ -609,9 +553,7 @@ class public RestBridge
             s! = response!.getOutputStream()
             s!.write(str(answer!))
             response!.setHeader("Reason-Phrase",str(errormsg!))
-            if debug then
-                System.out.println("REST: error 500 "+str(errormsg!))
-            fi
+            System.out.println("REST: error 500 "+str(errormsg!))
             response!.sendError(500,str(errormsg!))
             #logResponse(req_id$,response!)
             methodret
@@ -620,26 +562,6 @@ class public RestBridge
         if method$ = "PUT" or method$ = "DELETE" then
             response!.setStatus(num(statuscode!))
             if method$ = "DELETE" then
-				namespace! = BBjAPI().getGlobalNamespace()
-				handler! = namespace!.getValue(ses$ + "_OUTPUT_HANDLER", err=*next)
-				if handler! <> null() then
-					outputHandler! = eval(handler!)
-				else
-					outputHandler! = new OutputHandler()
-				endif
-				outputHandler!.setSession(ses$)
-				outputHandler!.setInvokeResult(answer!)
-				rem set the charset 
-				outputHandler!.setCharset(usedCharset!)
-				outputHandler!.setResponse(response!)
-				outputHandler!.setRequest(request!)
-				rem final call
-				outputHandler!.setAccept(accept$)
-				outputHandler!.setStatuscode(statuscode!)
-				outputHandler!.setErrormsg(errormsg!)
-				outputHandler!.setErrorcode(errorcode$)
-				outputHandler!.setStacktrace(stacktrace$)
-				outputHandler!.createOutput()
                 #logResponse(req_id$,response!)
                 methodret
             endif
@@ -649,27 +571,8 @@ class public RestBridge
             if statuscode! <> null() then
                 response!.setStatus(num(statuscode!))
             endif
+            
             if str(rs!) = "" then
-				namespace! = BBjAPI().getGlobalNamespace()
-				handler! = namespace!.getValue(ses$ + "_OUTPUT_HANDLER", err=*next)
-				if handler! <> null() then
-					outputHandler! = eval(handler!)
-				else
-					outputHandler! = new OutputHandler()
-				endif
-				outputHandler!.setSession(ses$)
-				outputHandler!.setInvokeResult(answer!)
-				rem set the charset 
-				outputHandler!.setCharset(usedCharset!)
-				outputHandler!.setResponse(response!)
-				outputHandler!.setRequest(request!)
-				rem final call
-				outputHandler!.setAccept(accept$)
-				outputHandler!.setStatuscode(statuscode!)
-				outputHandler!.setErrormsg(errormsg!)
-				outputHandler!.setErrorcode(errorcode$)
-				outputHandler!.setStacktrace(stacktrace$)
-				outputHandler!.createOutput()
                 #logResponse(req_id$,response!)
                 methodret
             endif
@@ -734,8 +637,7 @@ class public RestBridge
                 outputHandler! = new OutputHandler()
             endif
             
-            outputHandler!.setSession(ses$)
- 
+            outputHandler!.setResultSet(rs!)
             outputHandler!.setInvokeResult(answer!)
             
             rem set the charset 
@@ -745,24 +647,10 @@ class public RestBridge
             outputHandler!.setRequest(request!)
             
             rem final call
-            outputHandler!.setResultSet(rs!)
-
-            outputHandler!.setAccept(accept$)
-            outputHandler!.setStatuscode(statuscode!)
-            outputHandler!.setErrormsg(errormsg!)
-            outputHandler!.setErrorcode(errorcode$)
-            outputHandler!.setStacktrace(stacktrace$)
-
-            outputHandler!.createOutput()
-                       
+            outputHandler!.createOutput(accept$)
+                        
+            response!.setStatus(200)
             #logResponse(req_id$,response!)
-
-            IF TRACE_CH >0 THEN
-                ENDTRACE
-                CLOSE (TRACE_CH)
-                TRACE_CH=0
-            FI 
-
             methodret
         
         output_creation_error:
@@ -770,55 +658,15 @@ class public RestBridge
             response!.setContentType("text/plain")
             response!.sendError(500, "Failed to create the request output type: " + errmes(-1))
             #logResponse(req_id$,response!)
-
-
-            IF TRACE_CH >0 THEN
-                ENDTRACE
-                CLOSE (TRACE_CH)
-                TRACE_CH=0
-            FI 
-
             methodret
 
         setup_err:
             response!.setContentType("text/plain")
             s! = response!.getOutputStream()
             s!.write("stbl not set up correctly!")
-            if debug then
-                System.out.println("REST: error 500 STBLs not set up correctly! Need REST_WD and REST_ADAPTERPGM in config.bbx" )
-            fi
+            System.out.println("REST: error 500 STBLs not set up correctly! Need REST_WD and REST_ADAPTERPGM in config.bbx" )
             response!.sendError(500,"STBLs not set up correctly! Need REST_WD and REST_ADAPTERPGM in config.bbx" )
             #logResponse(req_id$,response!)
-
-
-            IF TRACE_CH >0 THEN
-                ENDTRACE
-                CLOSE (TRACE_CH)
-                TRACE_CH=0
-            FI 
-
-            methodret
-
-        too_many_workers_err:
-            response!.setContentType("text/plain")
-            s! = response!.getOutputStream()
-            s!.write("Too many workers!")
-            if debug then
-                System.out.println("REST: too many workers!" )
-            fi
-            response!.sendError(429,"Too many requests!" )
-            #logResponse(req_id$,response!)
-
-
-            IF TRACE_CH >0 THEN
-                ENDTRACE
-                CLOSE (TRACE_CH)
-                TRACE_CH=0
-            FI 
-
-            methodret
-
-
     methodend
 
 
@@ -839,7 +687,6 @@ class public RestBridge
             namespace!.removeValue(ses$+"_SERVLET_PARAMETERS")
             namespace!.removeValue(ses$+"_OUTPUT_HANDLER", err=*next)
             namespace!.removeValue(ses$+"_INPUT_HANDLER", err=*next)
-            namespace!.removeValue(ses$+"_THREAD", err=*next)
             
             methodret Boolean.FALSE
         fi
@@ -849,25 +696,6 @@ class public RestBridge
         noSes:
             methodret Boolean.FALSE
 
-    methodend
-
-    method private byte[] getBody(BBxServletRequest request!)
-        declare byte[] bytes!
-        declare ByteArrayOutputStream outputStream!
-        
-        outputStream! = new ByteArrayOutputStream()
-        bytes! = new byte[1024]
-        inputStream! = request!.getHttpServletRequest().getInputStream()
-        while 1
-            length = inputStream!.read(bytes!, err=*break)
-            if length = -1 then
-                break
-            endif
-            
-            outputStream!.write(bytes!, 0, length)
-        wend
-        
-        methodret outputStream!.toByteArray()
     methodend
 
     rem /**
@@ -881,7 +709,7 @@ class public RestBridge
     rem  * @param charset! The character Set to use for the VARCHAR fields
     rem  *
     rem  */
-    method private void setCharacterSet(ResultSet resultSet!, String charset!)
+    method private static void setCharacterSet(ResultSet resultSet!, String charset!)
         charsetIsSupported! = Boolean.FALSE
         charsetIsSupported! = Charset.isSupported(charset!, err=*next)
         if !charsetIsSupported! then
@@ -907,7 +735,7 @@ class public RestBridge
 
                 fieldType! = dataRow!.getFieldType(fieldName!)
                 if fieldType! = java.sql.Types.VARCHAR OR fieldType! = java.sql.Types.LONGVARCHAR then
-                    body! = dataRow!.getFieldAsString(fieldName!)                  
+                    body! = dataRow!.getFieldAsString(fieldName!)                   
                     body! = new String(new String(body!, info(1,2)).getBytes(charset!), charset!)                    
                     dataRow!.setFieldValue(fieldName!, body!)
                 endif
@@ -915,9 +743,8 @@ class public RestBridge
         wend
     methodend
 
-    method public BBjString newSession(BBjString auth$, HashMap servletParams!)
+    method public static BBjString newSession(BBjString auth$, HashMap servletParams!)
         namespace! = BBjAPI().getGlobalNamespace()
-        debug = num(stbl("DEBUG",err=*next),err=*next)
 
         rem create a new session
         while 1
@@ -927,9 +754,7 @@ class public RestBridge
             break
         wend
         
-        if debug then
-            System.out.println("REST: create "+ses$)
-        fi
+        System.out.println("REST: create "+ses$)
         namespace!.setValue(ses$+"_REQUEST","")
         namespace!.setValue(ses$+"_RESPONSE","")
         namespace!.setValue(ses$+"_SERVLET_PARAMETERS",servletParams!)
@@ -968,7 +793,6 @@ class public RestBridge
         responseSemaphore! = new java.util.concurrent.Semaphore(0)
         namespace!.setValue(ses$+"_REQUEST_SEM",requestSemaphore!)
         namespace!.setValue(ses$+"_RESPONSE_SEM",responseSemaphore!)
-        namespace!.setValue(ses$+"_THREAD",null())
 
         cp$=BBjAPI().getConfig().getCurrentCommandLineObject().getOriginalClasspathName()
         if cp$>"" cp$=" -CP"+cp$
@@ -983,22 +807,15 @@ class public RestBridge
         endif
 
         scmd$="bbj -q "+ t$ + cfg$ + cp$ + wd$ + pgm$ + " - " + ses$ + " " + auth$ + " &"
-        if debug then
-            System.out.println("REST: create "+scmd$)
-        fi
+        System.out.println("REST: create "+scmd$)
         a=scall(scmd$)
 
         methodret ses$
     methodend
 
-    method public HashMap invoke(BBjString ses$, HashMap instructions!)
+    method public static HashMap invoke(BBjString ses$, HashMap instructions!)
 
-        debug = num(stbl("DEBUG",err=*next),err=*next)
-        
-        if debug then
-            System.out.println("REST: invoke "+ses$)
-        fi
-        
+        System.out.println("REST: invoke "+ses$)
         requestSemaphore! = BBjAPI().getGlobalNamespace().getValue(ses$+"_REQUEST_SEM",err=noSes)
         responseSemaphore! = BBjAPI().getGlobalNamespace().getValue(ses$+"_RESPONSE_SEM")
 
@@ -1006,65 +823,36 @@ class public RestBridge
         namespace!.setValue(ses$+"_REQUEST",instructions!)
         requestSemaphore!.release()
         rem here's the remote session active
-        
-        REST_SERVLET_TIMEOUT = 60
-        REST_SERVLET_TIMEOUT = NUM(STR(#parameterMap!.get("REST_SERVLET_TIMEOUT",err=*next),err=*next),err=*next)
 
-        REST_KILL_WORKER_AT_TIMEOUT = 0
-        REST_KILL_WORKER_AT_TIMEOUT = NUM(#parameterMap!.get("REST_KILL_WORKER_AT_TIMEOUT",err=*next),err=*next)
-
-        
-        if debug then
-            System.out.println("REST_SERVLET_TIMEOUT is "+str(REST_SERVLET_TIMEOUT))
-        fi
-        
-
-        if !responseSemaphore!.tryAcquire(1,REST_SERVLET_TIMEOUT,java.util.concurrent.TimeUnit.SECONDS) then
-        
-            if debug then
-                System.out.println("Bridge: Timeout waiting on "+ses$)
-            fi
-            
-            if REST_KILL_WORKER_AT_TIMEOUT then
-
-                thread! = namespace!.getValue(ses$+"_THREAD",err=*next)
-
-                if debug then
-                    System.out.println("Bridge: Killing Thread "+str(thread!))
-                fi
-                
-                if thread! <> null() then
-                    thread!.stop(err=*next)
-                fi
-            fi
-
-            namespace!.removeValue(ses$+"_REQUEST", err=*next)
-            namespace!.removeValue(ses$+"_RESPONSE", err=*next)
-            namespace!.removeValue(ses$+"_REQUEST_SEM", err=*next)
-            namespace!.removeValue(ses$+"_RESPONSE_SEM", err=*next)
-            namespace!.removeValue(ses$+"_SERVLET_PARAMETERS", err=*next)
+        if !responseSemaphore!.tryAcquire(1,300,java.util.concurrent.TimeUnit.SECONDS) then
+            System.out.println("Bridge: Timeout waiting on "+ses$)
+            namespace!.removeValue(ses$+"_REQUEST")
+            namespace!.removeValue(ses$+"_RESPONSE")
+            namespace!.removeValue(ses$+"_REQUEST_SEM")
+            namespace!.removeValue(ses$+"_RESPONSE_SEM")
+            namespace!.removeValue(ses$+"_SERVLET_PARAMETERS")
             namespace!.removeValue(ses$+"_OUTPUT_HANDLER", err=*next)
             namespace!.removeValue(ses$+"_INPUT_HANDLER", err=*next)
-            namespace!.removeValue(ses$+"_THREAD", err=*next)
+            
+            System.out.println("REST: timeout on invoke "+ses$)
             throw "Timeout occurred",0
         fi
 
         response! = namespace!.getValue(ses$+"_RESPONSE",err=*next)
-        if debug then
-            System.out.println("REST: invoke done "+ses$)
-        fi
-        
+
+        System.out.println("REST: invoke done "+ses$)
         methodret response!
+
 
         noSes:
             throw  "Session invalid",11
 
     methodend
 
-    method private BBjString logRequest(BBxServletRequest request!)
+    method private BBjString logRequest(BBjspWebRequest request!)
 
         rlog$=stbl("REST_REQUESTLOG",err=skip)
-        
+        System.out.println("Logging request into "+rlog$)
         id$=""
 
         ch=unt
@@ -1115,7 +903,7 @@ class public RestBridge
 
     methodend
 
-    method private void logResponse(BBjString id$, BBxServletResponse response!)
+    method private void logResponse(BBjString id$, BBjspWebResponse response!)
 
         if id$="" then
             methodret
@@ -1128,7 +916,9 @@ class public RestBridge
 
         dim log$:#LOGTPL$
         log.id$=id$
-
+        System.out.println("------------------------")
+        System.out.println(log.id$)
+        System.out.println("------------------------")
         read record (ch,dom=skip,key=log.id$)log$
         log.END=System.currentTimeMillis()
         log.DURATION = log.END-log.START
@@ -1143,27 +933,23 @@ class public RestBridge
 
     methodend
 
-    method private HashMap getRequestLog(BBxServletRequest request!)
+    method private HashMap getRequestLog(BBjspWebRequest request!)
+        seterr skip 
+        
+        declare RequestLogBC requestLogBC!
+        requestLogBC! = new RequestLogBC()
 
         answer! = new HashMap()
-        rs! = new ResultSet()
-
-        rlog$=stbl("REST_REQUESTLOG",err=skip)
-
-
-        ch=unt
-        open (ch,err=skip)rlog$
-
-        tpl$=#LOGTPL$
-        dim log$:tpl$
-
-        while 1
-            read record (ch,end=*break)log$
-            dr! = com.basiscomponents.db.DataRow.fromTemplate(tpl$,log$)
-            rs!.addItem(dr!)
+        
+        filter! = new DataRow()
+        it! = request!.getParameterNames().iterator()
+        while it!.hasNext()
+            p$=it!.next()
+            filter!.setFieldValue(cvs(p$,4), request!.getParameter(p$))
         wend
 
-        close (ch)
+        requestLogBC!.setFilter(filter!)
+        rs! = requestLogBC!.retrieve(err=skip)
 
         answer!.put("statuscode","200")
         answer!.put("resultset",rs!)
@@ -1172,7 +958,7 @@ class public RestBridge
 
         skip:
             answer!.put("statuscode","404")
-            answer!.put("errormsg","request logging not enabled")
+            answer!.put("errormsg", errmes(-1))
             answer!.put("single",0)
             methodret answer!
 
@@ -1208,37 +994,23 @@ class public RestBridge
     rem  * @param context! The servlet context used to read the parameters defined for the RestBridge servlet
     rem  * @return a HashMap with the RestBridge parameters(=options) currenlty set.
     rem  */
-    method private HashMap getServletParameters(BBxServletContext context!)
-
-        if #parameterMap!<>NULL() then
-            methodret #parameterMap!
-        fi
+    method private static HashMap getServletParameters(BBjspServletContext context!)
 
         rem the list of available parameter names
         declare BBjVector parameterNames!
         parameterNames! = new BBjVector()
         parameterNames!.add("REST_PGM_PREFIX")
         parameterNames!.add("REST_PGM_SUFFIX")
-        parameterNames!.add("REST_JAVA_PACKAGE")
         parameterNames!.add("REST_WD")
         parameterNames!.add("REST_ADAPTERPGM")
         parameterNames!.add("REST_ADAPTERTERM")
         parameterNames!.add("REST_TIMEOUT")
-        parameterNames!.add("REST_SERVLET_TIMEOUT")
-        parameterNames!.add("REST_KILL_WORKER_AT_TIMEOUT")
-        parameterNames!.add("REST_MAX_WORKER_RECYCLECOUNT")
-        parameterNames!.add("REST_MAX_WORKER_COUNT")
         parameterNames!.add("REST_AUTHPGM")
         parameterNames!.add("REST_REQUESTLOG")
         parameterNames!.add("USE_GET_ALLOWED_FILTER")
         parameterNames!.add("REST_OUTPUT_HANDLER")
         parameterNames!.add("REST_INPUT_HANDLER")
         parameterNames!.add("REST_DEFAULT_CHARSET")
-        parameterNames!.add("REST_TRACE")
-        
-        parameterNames!.add("GRANT_TYPE")
-        parameterNames!.add("USERNAME")
-        parameterNames!.add("PASSWORD")
 
         rem the list of parameter names that must be set as STBL 
         declare BBjVector parameterNamesToSetAsSTBL!
@@ -1247,34 +1019,28 @@ class public RestBridge
         parameterNamesToSetAsSTBL!.add("REST_ADAPTERPGM")
         parameterNamesToSetAsSTBL!.add("REST_REQUESTLOG")
 
-        
+        declare HashMap parameterMap!
         declare BBjString parameterValue!
 
         rem the map to fill with the parameter names and values
-        #parameterMap! = new HashMap()
-
-        rem defaults
-        #parameterMap!.put("REST_KILL_WORKER_AT_TIMEOUT","0")
-
+        parameterMap! = new HashMap()
         for i=0 to parameterNames!.size() -1
             parameterName! = parameterNames!.get(i)
             parameterValue! = context!.getInitParameter(parameterName!)
 
             if parameterValue! <> null() then
-                #parameterMap!.put(parameterName!,parameterValue!)
+                parameterMap!.put(parameterName!,parameterValue!)
 
                 rem Setting the parameter as STBL
                 if parameterNamesToSetAsSTBL!.contains(parameterName!) then
                     void$ = stbl(parameterName!,parameterValue!)
                 endif
             else
-                #parameterMap!.put(parameterName!,stbl(parameterName!,err=*next))
+                parameterMap!.put(parameterName!,stbl(parameterName!,err=*next))
             endif
         next i
 
-
-        methodret #parameterMap!
-        
+        methodret parameterMap!
     methodend
 
 classend

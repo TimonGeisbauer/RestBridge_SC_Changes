@@ -1,5 +1,4 @@
 use java.util.HashMap
-use java.io.File
 use com.basiscomponents.db.ResultSet
 use com.basiscomponents.db.DataRow
 
@@ -8,7 +7,7 @@ use ::RestBridge/InputHandler.bbj::InputHandler
 seterr execerr
 
 debug=num(stbl("DEBUG",err=*next),err=*next)
-
+debug=1
 
 if debug then System.out.println("REST: new remote session ")
 
@@ -21,21 +20,8 @@ auth$ = argv(3)
 if debug then System.out.println("REST: WORKDIR "+dir(""))
 ses$=stbl("SESSIONID",ses$)
 
-BBjAPI().getGlobalNamespace().setValue(ses$+"_THREAD",Thread.currentThread())
-
 servletParams! = new HashMap()
 servletParams! = BBjAPI().getGlobalNamespace().getValue(ses$+"_SERVLET_PARAMETERS",err=*next)
-
-if servletParams!.get("REST_TRACE") <> null() then
-    tracedir$ = servletParams!.get("REST_TRACE").toString()
-    tracedir! = new File(tracedir$,err=*endif)
-    if tracedir!.exists() AND tracedir!.isDirectory()  then
-        TRACE_CH=UNT
-        OPEN (TRACE_CH,MODE="O_CREATE,O_TRUNC")tracedir$+"/RestBCAdapter_"+ses$+str(System.currentTimeMillis())+"_"+str(dec(INFO(3,1)))+".trace"
-        SETTRACE (TRACE_CH)
-    endif
-endif
-
 
 if debug then System.out.println("Got auth header: "+authtype$+" "+auth$)
 authtype$=cvs(authtype$,4)
@@ -93,21 +79,14 @@ responseSemaphore! = BBjAPI().getGlobalNamespace().getValue(ses$+"_RESPONSE_SEM"
 done_login:
 
 
-REST_TIMEOUT=60
-if servletParams!.containsKey("REST_TIMEOUT") then
-    REST_TIMEOUT=num(servletParams!.get("REST_TIMEOUT").toString(),err=*next)
-endif
-
-
-REST_MAX_WORKER_RECYCLECOUNT=0
-if servletParams!.containsKey("REST_MAX_WORKER_RECYCLECOUNT") then
-    REST_MAX_WORKER_RECYCLECOUNT=num(servletParams!.get("REST_MAX_WORKER_RECYCLECOUNT").toString(),err=*next)
-endif
-
+timeout=500
+rem if servletParams!.containsKey("REST_TIMEOUT") then
+rem     timeout=num(servletParams!.get("REST_TIMEOUT").toString(),err=*next)
+rem endif
 
 main_loop:
 
-    CLEAR EXCEPT user$, password$, ses$, requestSemaphore!, responseSemaphore!, ses!, authenticated, REST_TIMEOUT, usecount, debug, authpgm$, servletParams!, REST_MAX_WORKER_RECYCLECOUNT
+    CLEAR EXCEPT user$, password$, ses$, requestSemaphore!, responseSemaphore!, ses!, authenticated, timeout, usecount, debug, authpgm$, servletParams!
 
 
     seterr execerr
@@ -115,19 +94,18 @@ main_loop:
     dummy$=STBL("!SESSIONINFO",ses$+" - idle "+str(usecount))
 
     rem requestSemaphore!.acquire()
-    if !requestSemaphore!.tryAcquire(1,REST_TIMEOUT,java.util.concurrent.TimeUnit.SECONDS) then
+    if !requestSemaphore!.tryAcquire(1,timeout,java.util.concurrent.TimeUnit.SECONDS) then
         rem a timeout has occurred while trying to acquire the semaphore
 
         rem remove the sessions' namespace values
         namespace! = BBjAPI().getGlobalNamespace()
-        namespace!.removeValue(ses$+"_REQUEST")
-        namespace!.removeValue(ses$+"_RESPONSE")
-        namespace!.removeValue(ses$+"_REQUEST_SEM")
-        namespace!.removeValue(ses$+"_RESPONSE_SEM")
-        namespace!.removeValue(ses$+"_SERVLET_PARAMETERS")
+        namespace!.removeValue(ses$+"_REQUEST", err=*next)
+        namespace!.removeValue(ses$+"_RESPONSE", err=*next)
+        namespace!.removeValue(ses$+"_REQUEST_SEM", err=*next)
+        namespace!.removeValue(ses$+"_RESPONSE_SEM", err=*next)
+        namespace!.removeValue(ses$+"_SERVLET_PARAMETERS", err=*next)
         namespace!.removeValue(ses$+"_OUTPUT_HANDLER", err=*next)
         namespace!.removeValue(ses$+"_INPUT_HANDLER", err=*next)
-        namespace!.removeValue(ses$+"_THREAD", err=*next)
 
         rem Calling the ON_CLEANUP label to perform possible user defined cleanup operations
         call authpgm$+"::ON_CLEANUP",err=*next        
@@ -162,8 +140,17 @@ main_loop:
     inputHandler!.setRequestHeaders(request!.get("headers"))
     inputHandler!.setRequestedCustomMethod(request!.get("invoke"))
     inputHandler!.setRequestedCustomMethodReturnValueName(request!.get("retvarname"))
-    inputHandler!.setSession(ses$)
-    
+   
+    ch = unt
+    open(ch,mode="o_create,o_append")"/tsis/log/RestBridge.log"
+    write(ch) "-------------------------"
+    write(ch) "Time: " + str(date(0:"%Yz-%Mz-%Dz %Hz:%mz:%sz.%tz"))
+    write(ch) "URI: " + str(request!.get("uri"))
+    write(ch) "Method: " + str(request!.get("method"))
+    write(ch) "Request Body: " + str(request!.get("body"))
+    write(ch) "-------------------------"
+    close(ch)
+ 
     rem Get the BC name to invoke
     bcName! = inputHandler!.getBCName()  
     
@@ -216,24 +203,9 @@ main_loop:
             void$ = stbl("REST_PGM_SUFFIX", suffix$)
         endif
 
-        if servletParams!.containsKey("REST_JAVA_PACKAGE") then
-            java_package$ = servletParams!.get("REST_JAVA_PACKAGE")
-            void$ = stbl("REST_JAVA_PACKAGE", java_package$)
-        endif
-
-        
         bc! = null()
+        ok=0; bc! = eval("new ::" + prefix$ + bcName! + suffix$ + "::" + bcName! + "()", err=*next); ok=1
         
-        ok=0
-        
-        if ( java_package$ > "" ) then
-            bc! = eval("new " + java_package$ + "." + bcName! + "()",err=*next); ok=1
-        fi
-
-        if ok=0 then 
-            bc! = eval("new ::" + prefix$ + bcName! + suffix$ + "::" + bcName! + "()", err=*next); ok=1
-        fi
-
         if ok=0 then
             statuscode=404
             throw "Missing BC", 12
@@ -752,29 +724,15 @@ REM                 endif
             response!.put("BC",bcName!)
             response!.put("sel",urlExtension!)
             response!.put("primarykey",BCPrimaryKeyString!)
-            response!.put("statuscode","200")
             break
     swend
     
     send_response:
         usecount=usecount+1
+        usecount=usecount+1
         BBjAPI().getGlobalNamespace().setValue(ses$+"_RESPONSE",response!)
         responseSemaphore!.release()
-
-        if debug then 
-            System.out.println("REST: remote session done"+ses$)
-            System.out.println("REST_MAX_WORKER_RECYCLECOUNT: "+str(REST_MAX_WORKER_RECYCLECOUNT))
-            System.out.println("CYCLES: "+str(usecount))
-        fi
-        
-        IF REST_MAX_WORKER_RECYCLECOUNT>0 AND usecount >= REST_MAX_WORKER_RECYCLECOUNT THEN
-            if debug then 
-                System.out.println("max cycles reached - releasing worker")
-            fi
-            call authpgm$+"::ON_CLEANUP",err=*next  
-            RELEASE
-        FI
-        
+        if debug then System.out.println("REST: remote session done "+ses$)
         goto main_loop
 
 
@@ -807,11 +765,17 @@ REM                 endif
         response! = new HashMap()
 
         if authenticated>0 then
-            response!.put("statuscode",str(statuscode))
-            response!.put("errorcode",errorcode)
-            response!.put("errormsg",errormsg$)
-            rem consider: stack trace only with DEBUG flag in config?
-            response!.put("stacktrace",stacktrace$)         
+            if statuscode = 252 AND pos("License error: -4"=errormsg$) <> 0 then
+                response!.put("statuscode", "503")
+                response!.put("errorcode", 503)
+                response!.put("errormsg", "Licensed number of users already reached")	
+            else
+                response!.put("statuscode",str(statuscode))
+                response!.put("errorcode",errorcode)
+                response!.put("errormsg",errormsg$)
+                rem consider: stack trace only with DEBUG flag in config?
+                response!.put("stacktrace",stacktrace$) 
+            endif
         else
             response!.put("statuscode","401")
             response!.put("errorcode",errorcode)
@@ -820,11 +784,8 @@ REM                 endif
         fi
 
         BBjAPI().getGlobalNamespace().setValue(ses$+"_RESPONSE",response!)
-        responseSemaphore! = null()
-        responseSemaphore! = BBjAPI().getGlobalNamespace().getValue(ses$+"_RESPONSE_SEM",err=*next)
-        if responseSemaphore! <> null() then
-            responseSemaphore!.release()
-        fi
+        responseSemaphore! = BBjAPI().getGlobalNamespace().getValue(ses$+"_RESPONSE_SEM", err=*next)
+        responseSemaphore!.release(err=*next)
 
         wait 10; rem FIN_WAIT
 
@@ -834,9 +795,6 @@ REM                 endif
         namespace!.removeValue(ses$+"_REQUEST_SEM",err=*next)
         namespace!.removeValue(ses$+"_RESPONSE_SEM",err=*next)
         namespace!.removeValue(ses$+"_SERVLET_PARAMETERS",err=*next)
-        namespace!.removeValue(ses$+"_OUTPUT_HANDLER", err=*next)
-        namespace!.removeValue(ses$+"_INPUT_HANDLER", err=*next)
-        namespace!.removeValue(ses$+"_THREAD", err=*next)
 
         rem Calling the ON_CLEANUP label to perform possible user defined cleanup operations
         call authpgm$+"::ON_CLEANUP",err=*next       

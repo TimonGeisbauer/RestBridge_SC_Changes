@@ -16,6 +16,8 @@ rem HMAC authentication
 use javax.crypto.Mac
 use javax.crypto.spec.SecretKeySpec
 
+use ::api/SessionsBC.bbj::SessionsBC
+
 AUTHENTICATION:
     enter
     
@@ -27,7 +29,7 @@ AUTHENTICATION:
         jwt$ = auth$
         
         rem TODO: adjust these things according to your application's needs:
-        secret$ = "your-256-bit-secret"
+        secret$ = "7x!A%D*G-KaNdRgUkXp2s5v8y/B?E(H+"
 
         verifier! = new MACVerifier(secret$)
         signedJWT! = SignedJWT.parse(jwt$, err=jwt_failed)
@@ -60,40 +62,23 @@ AUTHENTICATION:
 
         rem if your payload is needed in original json, we also put the payload$ into an STBL
         dummy$ = STBL("JWTPAYLOAD", payload$)
+
+        ch = unt 
+        open(ch) "JWT_TOKEN"
+        read(ch, key=jwt$, dom=no_session) *, sessionID$ 
+        close(ch)
         
+        rem Overwriting the session ID, replacing it with the Session ID that is linked to the JWT Token
+        System.out.println("Using Existing Session ID: " + sessionID$)
+        dummy$ = STBL("SESSIONID", sessionID$)
         exit
+
+        no_session:
+            rem At this point the JWT has been validated but the Server Session is gone, 
+            rem probably killed therefore the Request should be rejected
+            throw "Session Expired", 401
     endif
-    
-    rem HMAC Authentication
-    if authtype$ = "HMAC" then
-        hmac$ = auth$
         
-        rem request is a HashMap at this point and not the actual 
-        request! = BBjAPI().getGlobalNamespace().getValue(ses$ + "_REQUEST", err=*next)
-        if request! = null() then
-            throw "Failed to retrieve request for the HMAC authentication", 25
-        endif
-      
-        rem TODO: adjust these things according to your application's needs:
-        secret!  = "your-256-bit-secret"
-      
-        sha256_HMAC! = Mac.getInstance("HmacSHA256")
-        secret_key! = new SecretKeySpec(secret!.getBytes(), "HmacSHA256")
-      
-        sha256_HMAC!.init(secret_key!)
-      
-        body! = new String(request!.get("body"))
-        data! = new String(body!.getBytes("UTF-8"))
-        hash! = new String(java.util.Base64.getEncoder().encode(sha256_HMAC!.doFinal(data!)))
-                                                           
-        if hmac$ <> hash! then
-            throw "Unauthorized", 25
-        endif
-        
-        authenticated = 1
-        exit
-    endif
-    
     rem BASIC Authentication
     if authtype$="BASIC" then
         auth$ = java.util.Base64.getDecoder().decode(auth$, err=*next)
@@ -104,15 +89,10 @@ AUTHENTICATION:
         rem changing the string encoding to the server's encoding
         user$ = new String(user$,"utf-8").getBytes(info(1,2))
         password$ = new String(password$,"utf-8").getBytes(info(1,2))
-    
-        rem BASIC Authentication against the Admin API
-        adminAPI! = BBjAPI().getAdmin(user$, password$, err=*next)
-        if adminAPI! = null() then
-            throw "Wrong username and/or password", 25
-        else
-            authenticated = 1
-            adminAPI!.release()
-        endif
+
+	    bc! = new SessionsBC()
+        bc!.login(stbl("SESSIONID"), user$, password$)
+	    authenticated = 1
     endif
     
 exit
@@ -129,7 +109,10 @@ PRE_AUTHENTICATION:
     rem code in this section could refuse the requests to those BCs and throw an Error.
     
     enter
-    
+   
+    rem auth$="Basic "+java.util.Base64.getEncoder().encode("admin:admin123")
+    rem exit
+ 
     token$ = request!.getParameter("_TOKEN")
     if token$ > "" then
         auth$="Basic " + token$
@@ -144,7 +127,7 @@ PRE_AUTHENTICATION:
         auth$ = str(request!.getHeader("authorization", err=*next))
     fi   
 
-    if cvs(str(request!.getParameter("grant_type")), 4) = "PASSWORD" then
+    if cvs(request!.getParameter("grant_type"), 4) = "PASSWORD" then
         user$ = request!.getParameter("username")
         password$ = request!.getParameter("password")
         auth$="Basic "+java.util.Base64.getEncoder().encode(user$+":"+password$)
@@ -152,15 +135,6 @@ PRE_AUTHENTICATION:
         rem we're using the Basic authentication way to pass username and password to the Adapter
         rem so that the "usual" login can be used to check the credentials
     fi
-    
-    if cvs(str(servletParams!.get("GRANT_TYPE",err=*endif)),4) = "PASSWORD" then 
-        user$ = str(servletParams!.get("USERNAME"),err=*next)
-        password$ = str(servletParams!.get("PASSWORD"),err=*next)
-        if user$>"" and password$>"" then 
-            auth$="Basic "+java.util.Base64.getEncoder().encode(user$+":"+password$)
-            System.out.println("Debug: "+auth$)
-        endif 
-    endif
         
     exit
 
@@ -175,14 +149,12 @@ jwt_failed:
 
 ON_REQUEST:
     rem This label gets called when a request has been made to the RestBridge.
-
     exit
 
 
 ON_CLEANUP:
     rem This label gets called right before the RestBCAdapter program ends.
     rem Use it to perform any outstanding cleanup operations.
-
     exit
 
 
@@ -190,12 +162,12 @@ ISSUE_JWT:
     enter
 
     rem TODO: adjust these things according to your application's needs:
-    secret$ = "your-256-bit-secret"
+    secret$ = "7x!A%D*G-KaNdRgUkXp2s5v8y/B?E(H+"
     issuer$ = "BBj REST Bridge Plug-In"
     audience$ = "You"
 
     rem make it expire in one day
-    expires_in = 24*60*60*1000
+    expires_in = 12*60*60*1000
     exp! = new java.util.Date(System.currentTimeMillis()+expires_in)
     
     headerBuilder! = new JWSHeader.Builder(JWSAlgorithm.HS256)
@@ -214,6 +186,11 @@ ISSUE_JWT:
     signedJWT!.sign(signer!)
     
     token! = signedJWT!.serialize()
+
+    ch = unt 
+    open(ch) "JWT_TOKEN"
+    write(ch) token!.toString(), stbl("SESSIONID")
+    close(ch)
 
     token_rec!.setFieldValue("access_token", token!)
     token_rec!.setFieldValue("expires_in", expires_in)

@@ -1,6 +1,6 @@
 This plugin allows you to deploy BBj or Java classes that follow the development paradigm of "BusinessComponents" as a RESTful web service. It features GET, POST, PUT, DELETE operations that are automatically translated to read, write and remove operation methods in your code.
 
-See https://github.com/BBj-Plugins/RestBridge/tree/master/ExampleBCs for a first naive sample implementation of a BC class on ChileCompany. 
+See https://github.com/BasisHub/ChileCompany for a first naive sample implementation of a BC class on ChileCompany. 
 
 ## Options
 
@@ -13,33 +13,6 @@ If set to 1 (default), the toJson method will always include the metadata used f
 ### SET RESTBRIDGE_OPT_ENABLEGZIP=1
 
 If set to 1 (default), the RestBridge tries to serve gzip content when the according "Accept-Encoding" header contains the tag "gzip". Note that only gzip is supported by the plug-in. If you do never wish to deliver compressed content, e.g. for compatibility reasons or for debugging purpose, set this toggle to "0".
-
-## Servlet Parameters
-
-The follwing Parameters are accepted in the configuration of the BBx Servlet
-in the Context Configuration:
-
-| Prameter                      | Purpose               |
-|-------------------------------|-----------------------|
-| REST_PGM_PREFIX               | General prefix added to the beginning of the program name when searching for a class based on the URL. |
-| REST_PGM_SUFFIX               | General suffix added to the end of the program name when searching for a class source file based on the URL. Typically .bbj |
-| REST_WD                       |  The working directory to be set for every request |
-| REST_ADAPTERPGM               |  The adapter, typically RestBCAdapter.bbj |
-| REST_ADAPTERTERM              |  The terminal to set, e.g. IO or Tx |
-| REST_TIMEOUT                  |  The timeout after which idle background workers terminate. Default: 60 seconds. |
-| REST_TRACE                    |  The path of a directory to write a SETTRACE of the servlet and the BC Adapter. The directory must exist and be writable. Else the parameter will be ignored | 
-| REST_SERVLET_TIMEOUT          | Timeout after which a timeout is sent as response if the worker did not return in this moment. |
-| REST_KILL_WORKER_AT_TIMEOUT   | If set to 1 the worker will be killed when the servlet observes a timeout. If not set or 0, the worker will continue to run, potentially for a long time if the request was bad and leads to long code execution. |
-| REST_MAX_WORKER_COUNT         | The maximum number of parallel workers per user |
-| REST_MAX_WORKER_RECYCLECOUNT  | The number of rounds a worker is re-used before it ends itself and cleans up |
-| REST_AUTHPGM                  | The authentication program handling custom authentication rules. Default: authenticate.bbj |
-| REST_REQUESTLOG               |  Optional: path to a VKeyed file that will log every request |
-| USE_GET_ALLOWED_FILTER        |  If set to 1, the BC can optionally implement the method "getAllowedFilter" to determine which fields are allowed as query fields. | 
-| REST_INPUT_HANDLER            | Path to a custom input handler |
-| REST_OUTPUT_HANDLER           | Path to a custom output handler | 
-| REST_DEFAULT_CHARSET          | The charset for transport. Defaults to UTF-8 |
-| REST_JAVA_PACKAGE             | The java package name of the BCs | 
-
 
 ## Output Handling
 
@@ -55,7 +28,7 @@ The data conversion of the RestBridge has been extracted into a separate class c
 | application/xls  |     XLSX    |
 | application/json |     JSON    |      
 
-By defining a custom output handler, you can extend that list and handle custom MIME-Types as well. To do so, create a class which extends the RestBridge's <code>OutputHandler</code> class, and override the <code>createContent()</code> method. By overriding this method, you can handle the data conversion based on the accept header value yourself. Your class will then look like the following:
+By defining a custom output handler, you can extend that list and handle custom MIME-Types as well. To do so, create a class which extends the RestBridge's <code>OutputHandler</code> class, and override the <code>createContent(String)</code> method. By overriding this method, you can handle the data conversion based on the accept header value yourself. Your class will then look like the following:
 
 ```
 use ::RestBridge/OutputHandler.bbj::OutputHandler
@@ -71,15 +44,16 @@ class public CustomOutputHandler extends OutputHandler
     rem  * as String. The method return an empty String if the content is returned 
     rem  * in a different way, for example per file download.
     rem  * 
+    rem  * @param accept! The accept header sent by the client for the given request
     rem  * @return the content in the requested format or an empty string if the 
     rem  *         content was returned using a file download for instance.
     rem  */
-    method public String createContent()
+    method public String createContent(String accept!)
         rem Convert the ResultSet into the requested type based on the accept! value
         rem and return it as String
 
         rem fallback to the standard output handler in case the MIME type is unknown
-        methodret #super!.createContent()
+        methodret #super!.createContent(accept!)
     methodend
 
 classend
